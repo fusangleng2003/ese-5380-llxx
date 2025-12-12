@@ -1,6 +1,6 @@
 export CUDA_VISIBLE_DEVICES=$3
 
-all_models=("Informer", "Reformer")
+all_models=("Informer" "Reformer")
 start_index=$1
 end_index=$2
 models=("${all_models[@]:$start_index:$end_index-$start_index+1}")
