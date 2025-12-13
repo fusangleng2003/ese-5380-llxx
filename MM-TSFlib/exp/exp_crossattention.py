@@ -62,7 +62,7 @@ class CrossAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(attention_dim)
         
-        self.gate_param = nn.Parameter(torch.full((1, seq_len, 1), -2.0))
+        self.gate_param = nn.Parameter(torch.full((1, seq_len, 1), -4.0))
 
     def forward(self, x_query, x_key_value, original_query):
         # x_query: [Batch, Seq_Len, 1]
@@ -95,7 +95,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.text_len=configs.text_len
         self.d_llm = configs.llm_dim
         self.pred_len=configs.pred_len
-        self.text_embedding_dim = 512
+        self.text_embedding_dim = configs.text_emb
         self.pool_type=configs.pool_type
         self.use_fullmodel=configs.use_fullmodel
         self.hug_token=configs.huggingface_token
@@ -115,7 +115,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             query_input_dim=c_out,           
             key_input_dim=self.text_embedding_dim, 
             seq_len=self.args.pred_len,  
-            attention_dim= 128,              
+            attention_dim=32,                
             num_heads=4, 
             dropout=0.2                   
         ).to(self.device)
@@ -473,14 +473,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)[0]
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)[0]
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 if self.Doc2Vec==False:
@@ -494,7 +494,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         global_min_pool = F.adaptive_max_pool1d(-1.0*prompt_emb.transpose(1, 2), 1).squeeze(2)
                         prompt_emb=global_min_pool.unsqueeze(-1)
                     elif self.pool_type == "attention":
-                        outputs = outputs 
+
+                        outputs = self.cross_attention(outputs, prompt_emb, outputs) 
                 
                 else:
                     prompt_emb=prompt_emb.unsqueeze(-1)
@@ -574,7 +575,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     prompt_emb =self.llm_model(inputs_embeds=prompt_embeddings).last_hidden_state
                 else:
                     prompt_emb=prompt_embeddings 
-                prompt_emb = self.mlp(prompt_emb)  # mark!!!!!!!!!!!
+                prompt_emb = self.mlp(prompt_emb) 
                 # decoder input
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
@@ -582,14 +583,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)[0]
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)[0]
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 if self.Doc2Vec==False:
@@ -603,10 +604,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         global_min_pool = F.adaptive_max_pool1d(-1.0*prompt_emb.transpose(1, 2), 1).squeeze(2)
                         prompt_emb=global_min_pool.unsqueeze(-1)
                     elif self.pool_type == "attention":
-                        outputs = outputs
-                        #outputs = self.cross_attention(outputs, prompt_emb, outputs)
+
+                        outputs = self.cross_attention(outputs, prompt_emb, outputs)
                 else:
-                    prompt_emb=prompt_emb.unsqueeze(-1)     
+                    prompt_emb=prompt_emb.unsqueeze(-1)
+                #prompt_y=norm(prompt_emb)+prior_y
+                #outputs=(1-self.prompt_weight)*outputs+self.prompt_weight*prompt_y
+                
                 
                 
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
@@ -638,7 +642,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
-            early_stopping(test_loss, self.model, path)
+            early_stopping(vali_loss, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
                 break
@@ -699,14 +703,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)[0]
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)[0]
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, text_emb=prompt_emb)
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 if self.Doc2Vec==False:
@@ -720,7 +724,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         global_min_pool = F.adaptive_max_pool1d(-1.0*prompt_emb.transpose(1, 2), 1).squeeze(2)
                         prompt_emb=global_min_pool.unsqueeze(-1)
                     elif self.pool_type == "attention":
-                        outputs = outputs
+
+                        outputs = self.cross_attention(outputs, prompt_emb, outputs)
                 #0523
                 else:
                     prompt_emb=prompt_emb.unsqueeze(-1)

@@ -5,6 +5,57 @@ from layers.Transformer_EncDec import Encoder, EncoderLayer
 from layers.SelfAttention_Family import ReformerLayer
 from layers.Embed import DataEmbedding
 
+class CrossAttention(nn.Module):
+    def __init__(self, d_model, text_dim, seq_len, num_heads=4, dropout=0.1):
+        super().__init__()
+        
+        self.layer_norm_q = nn.LayerNorm(d_model)
+        self.layer_norm_k = nn.LayerNorm(text_dim)
+
+        self.proj_q = nn.Linear(d_model, d_model)
+        self.proj_k = nn.Linear(text_dim, d_model)
+        self.proj_v = nn.Linear(text_dim, d_model)
+        
+        self.attention = nn.MultiheadAttention(embed_dim=d_model, num_heads=num_heads, batch_first=True, dropout=dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * 4, d_model),
+            nn.Dropout(dropout)
+        )
+        self.norm2 = nn.LayerNorm(d_model)
+  
+        self.gate_param = nn.Parameter(torch.full((1, seq_len, 1), 0.0))
+
+    def forward(self, x_query, x_key_value):
+        original_query = x_query
+        
+        # --- Step 1: Cross Attention ---
+        q = self.proj_q(self.layer_norm_q(x_query))        
+        k = self.proj_k(self.layer_norm_k(x_key_value))    
+        v = self.proj_v(self.layer_norm_k(x_key_value))    
+        
+        attn_out, _ = self.attention(query=q, key=k, value=v)
+        
+        # Add & Norm
+        x = x_query + self.dropout1(attn_out)
+        x = self.norm1(x)
+
+        ffn_out = self.ffn(x)
+        
+        # Add & Norm
+        x = x + ffn_out
+        x = self.norm2(x)
+
+        # --- Step 3: Gating Fusion ---
+        alpha = torch.sigmoid(self.gate_param)
+        final_output = (1 - alpha) * original_query + alpha * x
+        
+        return final_output
 
 class Model(nn.Module):
     """
@@ -39,6 +90,14 @@ class Model(nn.Module):
             norm_layer=torch.nn.LayerNorm(configs.d_model)
         )
 
+        self.cross_fusion = CrossAttention(
+            d_model=configs.d_model,    
+            text_dim=configs.d_model,   
+            seq_len=configs.seq_len + configs.pred_len,
+            num_heads=4,                
+            dropout=0.3
+        )
+
         if self.task_name == 'classification':
             self.act = F.gelu
             self.dropout = nn.Dropout(configs.dropout)
@@ -48,7 +107,7 @@ class Model(nn.Module):
             self.projection = nn.Linear(
                 configs.d_model, configs.c_out, bias=True)
 
-    def long_forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+    def long_forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, text_emb = None):
         # add placeholder
         x_enc = torch.cat([x_enc, x_dec[:, -self.pred_len:, :]], dim=1)
         if x_mark_enc is not None:
@@ -57,6 +116,11 @@ class Model(nn.Module):
 
         enc_out = self.enc_embedding(x_enc, x_mark_enc)  # [B,T,C]
         enc_out, attns = self.encoder(enc_out, attn_mask=None)
+        #dec_out = self.projection(enc_out)
+
+        if text_emb is not None:
+            enc_out = self.cross_fusion(enc_out, text_emb)
+
         dec_out = self.projection(enc_out)
 
         return dec_out  # [B, L, D]
@@ -113,9 +177,9 @@ class Model(nn.Module):
         output = self.projection(output)  # (batch_size, num_classes)
         return output
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None, text_emb = None):
         if self.task_name == 'long_term_forecast':
-            dec_out = self.long_forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
+            dec_out = self.long_forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, text_emb)
             return dec_out[:, -self.pred_len:, :]  # [B, L, D]
         if self.task_name == 'short_term_forecast':
             dec_out = self.short_forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
