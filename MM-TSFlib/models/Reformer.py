@@ -9,7 +9,6 @@ class CrossAttention(nn.Module):
     def __init__(self, d_model, text_dim, seq_len, num_heads=4, dropout=0.1):
         super().__init__()
         
-        # --- 1. Attention 部分 ---
         self.layer_norm_q = nn.LayerNorm(d_model)
         self.layer_norm_k = nn.LayerNorm(text_dim)
 
@@ -46,7 +45,6 @@ class CrossAttention(nn.Module):
         x = x_query + self.dropout1(attn_out)
         x = self.norm1(x)
 
-        # --- Step 2: FFN (Feed Forward) ---
         ffn_out = self.ffn(x)
         
         # Add & Norm
